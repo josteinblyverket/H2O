@@ -2,7 +2,9 @@ import sys, os, glob
 import os
 import numpy as np
 import xarray as xr
+import matplotlib
 import matplotlib.pyplot as plt
+#matplotlib.use('Agg')
 import pandas as pd
 from shapely.geometry import Polygon, MultiPolygon, shape, Point
 import geopandas as gp
@@ -11,6 +13,7 @@ import pyproj
 import requests
 import cartopy.crs as ccrs
 from cartopy.io.img_tiles import Stamen
+import cartopy.feature as cfeature
 tiler = Stamen('terrain-background')
 
 
@@ -38,12 +41,13 @@ def convert_3D_2D(geometry):
 def getDomainData(expdirs):
 
     # Assuming same forcing
-    FORCING=xr.open_dataset(expdirs+'FORCING.nc', cache=False,use_cftime=False)
-    print(FORCING.LAT.min(), FORCING.LAT.max())
-    print(FORCING.LON.min(), FORCING.LON.max())
+    #FORCING=xr.open_dataset(expdirs+'forcing/2023050100/FORCING.nc', cache=False,use_cftime=False)
+    FORCING=xr.open_dataset('/lustre/storeB/users/josteinbl/sfx_data/LDAS_NOR/archive/2022/12/12/06/raw.nc', cache=False,use_cftime=False)
+    print(FORCING.latitude.min(), FORCING.latitude.max())
+    print(FORCING.longitude.min(), FORCING.longitude.max())
 
-    fPREP=xr.open_dataset(expdirs+'PREP.nc', cache=False,use_cftime=False)
-    fPGD=xr.open_dataset(expdirs+'PGD.nc', cache=False,use_cftime=False)
+    fPREP=xr.open_dataset('/lustre/storeB/users/josteinbl/sfx_data/LDAS_NOR/'+'archive/2023/04/01/00/SURFOUT.nc', cache=False,use_cftime=False)
+    fPGD=xr.open_dataset('/lustre/storeB/users/josteinbl/sfx_data/LDAS_NOR/'+'climate/PGD.nc', cache=False,use_cftime=False)
 
     # Add coords etc so that surfex files may be processed
     R_pysurfex=6371000 # and met nordic
@@ -57,7 +61,7 @@ def getDomainData(expdirs):
         standard_parallels=(63,63))#,
     geodetic=ccrs.Geodetic() #default WGS84
 
-    return myP, proj_string, fPREP, fPGD, FORCING
+    return myP, proj_string, fPREP, fPGD, FORCING, lcc
 
 
 def readStationList(stationfile):
@@ -74,8 +78,10 @@ def readStationList(stationfile):
 
     stations['GauID']=stations.GauID+'.0'
 
+    return stations
+
     
-def readShapeFiles(shapefiles):
+def readShapeFiles(shapefiles, stations):
 
     # or Outlets to sea defined for Europe CCM2
 #    ccm2_basins = gp.read_file(shapefiles,layer='SEAOUTLETS')
@@ -85,6 +91,11 @@ def readShapeFiles(shapefiles):
     #regs = gp.read_file('/lustre/storeB/project/nwp/H2O/wp4/RRdata/shapefiles/utm33shp/NVEData/Hydrologi/Hydrologi_TotalNedborfeltMalestasjon.shp')
     regs2 = gp.read_file(shapefiles)
 
+    print("prior")
+    print(regs2.columns)
+    regs2=regs2.loc[regs2['stID'].isin(stations.GauID)]
+
+    print("posterior")
     #inspect the shape file
     print(regs2.crs)
     print(regs2.columns)
@@ -100,8 +111,9 @@ def readShapeFiles(shapefiles):
         ax1 = fig.add_subplot(1, 1, 1, projection=ccrs.PlateCarree(), frameon=False)
  
         ax1.coastlines(resolution='10m')
-  
-        regs2.plot(column='stID',kind='geo',edgecolor="g",linewidth=0.2,
+        toplot= regs2.cx[FORCING.longitude.min().values:FORCING.longitude.max().values,FORCING.latitude.min().values:FORCING.latitude.max().values]
+
+        toplot.plot(column='stID',kind='geo',edgecolor="g",linewidth=0.2,
                    ax=ax1,legend=True,cmap='Reds',transform=ccrs.Geodetic())
         #,legend_kwds={"orientation": "horizontal", "pad": 0.01, "label": "VassOmrNr"})
         #ccm2sub.plot(column='AREA_KM2',kind='geo',edgecolor="g",linewidth=0.2,ax=ax1,legend=True,cmap='Reds',legend_kwds={"orientation": "horizontal", "pad": 0.01})
@@ -125,21 +137,25 @@ def readModelData(expdirs, expdirfs, fPREP, fPGD, ncstart, expnam, variables):
 
     for i in np.arange(0,numruns):
         dictds[expnam[i]] = xr.open_mfdataset(expdirs+expdirfs[i]+ncstart[i]+
-                                          'sel2021??.nc',
+                                          'sel2023??.nc',
                                           cache=False,
                                           preprocess=preprocess,
                                           concat_dim="time",
                                           combine="nested",
                                           chunks={'time': 1})
         print(expnam[i] + ' given to: ' +expdirs+expdirfs[i]+ncstart[i]+
-              'sel20????.nc')
-    
+              'sel2023??.nc')
+
+    print(dictds)
+
     return dictds
 
 def generateWeights(dictds, fPREP, fPGD, FORCING, regs2, weightfile):
 
     # xesmf needs dataset to generate weights
     TSr=dictds[expnam[-1]]['RUNOFFC_ISBA'].isel(time=0).to_dataset()
+    print('TSr')
+    print(TSr)
 
     xfalseaR, yfalseaR = myP(fPREP.LONORI.data, fPREP.LATORI.data,inverse=False)
     #Surfex makes all coords positive by setting the origin to the lower left corner
@@ -160,10 +176,14 @@ def generateWeights(dictds, fPREP, fPGD, FORCING, regs2, weightfile):
     TSr.coords['lon_b'] = (('yb','xb'),Lon2b)
     TSr.set_coords(['lat_b','lon_b'])
 
-    TSr.coords['lat'] = (('y','x'),FORCING.LAT.data)
-    TSr.coords['lon'] = (('y','x'),FORCING.LON.data)
-    TSr.lon.attrs=FORCING.LON.attrs
-    TSr.lat.attrs=FORCING.LAT.attrs
+    print("Forcing lat data")
+    print(np.shape(FORCING.latitude.data))
+    #print(TSr.coords['lat_b'])
+
+    TSr.coords['lat'] = (('y','x'),FORCING.latitude.data)
+    TSr.coords['lon'] = (('y','x'),FORCING.longitude.data)
+    TSr.lon.attrs=FORCING.longitude.attrs
+    TSr.lat.attrs=FORCING.longitude.attrs
     TSr.set_coords(['lat','lon'])
 
     TSr['mask']=TSr.RUNOFFC_ISBA.isnull()
@@ -241,8 +261,8 @@ def run(dictds, expname, TSr, savg, resultn):
         # LRESETCUMUL = .true. in NAM_WRITE_DIAG_SURFn 
         # see https://www.umr-cnrm.fr/surfex/spip.php?article406 )
         # so need to deaccumulate
-        if expnam[i] in ['nm12snowl', 'nmdtB07','nmSOC','nbni','s']:
-            tmp1=tmp1.diff(dim='time')
+        #if expnam[i] in ['LDAS_FC']:
+        #    tmp1=tmp1.diff(dim='time')
         tmp1=tmp1.to_dataset(name=expnam[i])
         tmp1['mask']=TSr.RUNOFFC_ISBA.isnull()
         tmp1['mask'].values=np.where(~TSr.RUNOFFC_ISBA.isnull(),1,0)
@@ -254,40 +274,82 @@ def run(dictds, expname, TSr, savg, resultn):
         cachrunoff[expnam[i]]=out.to_pandas()
         rainfRun= cachrunoff[expnam[i]]=out.to_pandas()
         print("rainfRun")
-        print(rainfRun)
-        rainfRun["50.64.0"].plot()
+        print(rainfRun.keys())
+
+        rainfRun[:].plot()
+        #rainfRun.plot()
+        plt.title(expnam[i], fontsize=12)
         plt.show()
         cachrunoff[expnam[i]].to_csv(expnam[i]+'.csv')
 
 
 if __name__ == "__main__":
 
-    expdirs='/lustre/storeB/project/nwp/H2O/wp4/SURFEX_offline/open_SURFEX_V8_1/MY_RUN/KTEST/'
-    forcingfile = '/lustre/storeB/project/nwp/H2O/wp4/FORCING/527_450_2020/FORCING_527_450_202010.nc'
+    expdirs='/lustre/storeB/users/josteinbl/sfx_data/'
+    #forcingfile = '/lustre/storeB/project/nwp/H2O/wp4/FORCING/527_450_2020/FORCING_527_450_202010.nc'
     stationfile = '/lustre/storeB/project/nwp/H2O/wp4/RRdata/stations_Huang20.txt'
 #    shapefiles = '/lustre/storeB/project/nwp/H2O/wp4/RRdata/shapefiles/CCM2/ccm21/WGS84_W2008.gdb'
     shapefiles = '/lustre/storeB/project/nwp/H2O/wp4/RRdata/shapefiles/latlonHyd/latlonhydorder/NVEData/Hydrologi/Hydrologi_TotalNedborfeltMalestasjon.shp'
-    weightfile = '/lustre/storeB/users/josteinbl/TOPD/spatial_avg_4catchments_527nature2lim.nc'
+    #shapefiles = '/lustre/storeB/project/nwp/H2O/wp4/RRdata/shapefiles/latlonREG/Nedborfelt/Nedborfelt_Vassdragsomr.shp'
+
+    weightfile = '/lustre/storeB/users/josteinbl/sfx_data/LDAS_NOR/spatial_avg_4catchments_527nature2lim.nc'
 
     # folder where runs are, this could have been a long list of different exps.
-    expdirfs=['527_450/']
+    #expdirfs=['LDAS_NOR/', 'LDAS_NOR_eps_05/']
+    expdirfs=['LDAS_FC/']
     # start of nc-file-output from runs
+    #openoflsel201903.nc
+    
+    # Analysis mode:
+    #ncstart=  ['openofl', 'openofl']
     ncstart=  ['openofl']
     # choose a name for legend in plots
-    expnam=['mebglac_albevol']
+    #expnam=['LDAS_NOR', 'LDAS_NOR_eps_05']
+    expnam=['LDAS_FC']
+
     variables = ['RUNOFFC_ISBA', 'DRAINC_ISBA']
 
-    myP, proj_string, fPREP, fPGD, FORCING = getDomainData(expdirs)
-    readStationList(stationfile)
+    myP, proj_string, fPREP, fPGD, FORCING, lcc = getDomainData(expdirs)
+    stations = readStationList(stationfile)
 
-    regs2 = readShapeFiles(shapefiles)
+    regs2 = readShapeFiles(shapefiles, stations)
 
     dictds = readModelData(expdirs, expdirfs, fPREP, fPGD, ncstart, expnam, variables)
     
-    TSr, savg, resultn = generateWeights(dictds, fPREP, fPGD, FORCING, regs2)
+    TSr, savg, resultn = generateWeights(dictds, fPREP, fPGD, FORCING, regs2, weightfile)
 
     run(dictds, expnam, TSr, savg, resultn)
 
+    plot_catchments = False
 
+    if plot_catchments == True:
 
+        #for sid in regs2.stID:
+        #for sid in stations["GauID"]:
 
+        fig = plt.figure(figsize=(12,7))
+        #gs = fig.add_gridspec(1, 1)
+        #ax0=fig.add_subplot(gs[0,0], projection=ccrs.PlateCarree())
+        #ax0.set_extent([FORCING.longitude.data.min()-15, FORCING.longitude.data.max()+15, FORCING.latitude.data.min()-15, FORCING.latitude.data.max()+15], crs=ccrs.PlateCarree())
+        #ax0.add_feature(cfeature.LAND)
+        #ax0.add_feature(cfeature.COASTLINE)
+        #ax0.add_image(tiler, 7)
+        #gl = ax0.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
+        #              linewidth=2, color='gray', alpha=0.5, linestyle='--')
+        #ax0.plot(FORCING.longitude[[0,0,-1,-1,0],[0,-1,-1,0,0]].values.diagonal(),FORCING.latitude[[0,0,-1,-1,0],[0,-1,-1,0,0]].values.diagonal(),color='blue', linewidth=2,transform=ccrs.Geodetic())
+        #gl.top_labels = gl.right_labels = False
+        ax0b = fig.add_subplot(projection=lcc)
+        ax0b.set_extent([TSr.x.min(), TSr.x.max(), TSr.y.min(), TSr.y.max()], crs=lcc)
+        gl = ax0b.gridlines(crs=ccrs.PlateCarree(), draw_labels=True,
+                  linewidth=0.8, color='gray', alpha=0.5, linestyle='--')
+        gl.top_labels = gl.right_labels = False
+        ax0b.add_image(tiler, 7)
+        #regs2[regs2.stID==sid].boundary.plot(ax=ax0b,transform=ccrs.Geodetic(),color='r')            
+        regs2.boundary.plot(ax=ax0b,transform=ccrs.Geodetic(),color='r')            
+        #plt.title(sid+' '+str(resultn.areal_km2[resultn.stID==sid])+' km2')
+        #regs2.boundary.plot(ax=ax0b,transform=ccrs.Geodetic(),color='r')
+        plt.tight_layout()
+        #plt.savefig("/lustre/storeB/users/josteinbl/TOPD/Figures/"+sid+'_snowDA_test.png')
+        #plt.savefig('/lustre/storeB/users/josteinbl/TOPD/Figures/All_catchments_snowDA_test.png')
+        #plt.close()
+        #plt.show()
